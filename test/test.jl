@@ -26,23 +26,28 @@ mutable struct ImageData{T}
 end
 
 ## Demoisaic
+
+mutable struct DemoisaicParams
+    file::String
+end
+
 mutable struct Demoisaic <: Processor
-    params::Dict
+    params::DemoisaicParams
     data::ImageData
 end
 
-function process!(p::Demoisaic, params)
+function process!(p::Demoisaic, params::DemoisaicParams)
     if !need_update(p, params)
         p.data.updated = false
         return
     end
-    raw_image, img = get_demoisaic(params[:file])
+    raw_image, img = get_demoisaic(params.file)
     p.data.raw_image = raw_image
     p.data.img = img
     p.data.updated = true
     p.data.initialized = true
 
-    p.params = params
+    p.params = deepcopy(params)
     
     p
 end
@@ -64,12 +69,17 @@ function get_demoisaic(file)
 end
 
 ## WhiteBalance
+
+mutable struct WhiteBalanceParams
+    method::Symbol
+end
+
 mutable struct WhiteBalance <: Processor
-    params::Dict
+    params::WhiteBalanceParams
     data::ImageData
 end
 
-function process!(p::WhiteBalance, params, previous::ImageData)
+function process!(p::WhiteBalance, params::WhiteBalanceParams, previous::ImageData)
 
     if !need_update(p, params, previous)
         p.data.updated = false
@@ -85,7 +95,7 @@ function process!(p::WhiteBalance, params, previous::ImageData)
     img = p.data.img
     copyto!(img, previous.img);
 
-    if params[:method] == :as_shot
+    if params.method == :as_shot
         # apply white balance as shot
         mult = LibRaw.camera_multipliers(raw_image)
         LibRaw.apply_multipliers!(img, mult);
@@ -110,7 +120,7 @@ function process!(p::WhiteBalance, params, previous::ImageData)
 
     p.data.updated = true
     p.data.initialized = true
-    p.params = params
+    p.params = deepcopy(params)
     p
 end
 
@@ -118,12 +128,18 @@ end
 
 sigmoid(x, σ, μ) = 1 / (1 + exp(-(x-μ)/σ))
 
+mutable struct ToneCurveParams
+    method::Symbol
+    contrast::Float64
+    exposure::Float64
+end
+
 mutable struct ToneCurve <: Processor
-    params::Dict
+    params::ToneCurveParams
     data::ImageData
 end
 
-function process!(p::ToneCurve, params, previous::ImageData)
+function process!(p::ToneCurve, params::ToneCurveParams, previous::ImageData)
 
     if !need_update(p, params, previous)
         p.data.updated = false
@@ -131,7 +147,7 @@ function process!(p::ToneCurve, params, previous::ImageData)
     end
 
     @info "Tone Curve"
-    exposure, contrast = params[:exposure], params[:contrast]
+    exposure, contrast = params.exposure, params.contrast
 
     if !p.data.initialized
         p.data.img = zeros(size(previous.img,1), size(previous.img,2), size(previous.img,3))
@@ -139,30 +155,33 @@ function process!(p::ToneCurve, params, previous::ImageData)
     img = p.data.img
     copyto!(img, previous.img[:,:,1:3])
     
-    if params[:method] == :log_sigmoid
+    if params.method == :log_sigmoid
         @. img = log10(max(img, 1e-16))
         mu = mean(img)
         @. img = sigmoid(img - mu, exposure, contrast)
-    elseif params[:method] == :linear
-        img = img ./ maximum(scaled)
+    elseif params.method == :linear
+        m = maximum(scaled)
+        @. img = img / m 
         @. img = img(scaled, 0, 1)
     end
 
     p.data.updated = true
     p.data.initialized = true
-    p.params = params
+    p.params = deepcopy(params)
     p
-
 end
 
 ## Render
 
+mutable struct RenderParams
+end
+
 mutable struct Render <: Processor
-    params::Dict
+    params::RenderParams
     data::ImageData
 end
 
-function process!(p::Render, params, previous::ImageData)
+function process!(p::Render, params::RenderParams, previous::ImageData)
 
     if !need_update(p, params, previous)
         p.data.updated = false
@@ -178,51 +197,82 @@ function process!(p::Render, params, previous::ImageData)
     img = p.data.img
 
     toned = previous.img
-    for i in axes(img,1), j in axes(img,2)
+    for j in axes(img,2), i in axes(img,1)
         img[i,j] = Colors.RGB(toned[i,j,1], toned[i,j,2], toned[i,j,3])
     end
 
     p.data.updated = true
     p.data.initialized = true
-    p.params = params
+    p.params = deepcopy(params)
     p
 
 end
 
 ##
 
+file = "J:\\photo2\\2024\\Juin\\Manif contre le FN\\0V2A9704.CR3"
 
-file = Dict(:file => "J:\\photo2\\2024\\Juin\\Manif contre le FN\\0V2A9704.CR3")
-wb = Dict(:method => :as_shot)
-tone_curve_params = Dict(:method => :log_sigmoid, :contrast => 0.5, :exposure => 0.5)
-
-raw_image = LibRaw.RawImage(file[:file])
+raw_image = LibRaw.RawImage(file)
 w, h = LibRaw.raw_width(raw_image), LibRaw.raw_height(raw_image)
 
+demoisaic_params = DemoisaicParams(file)
+whitebalance_params = WhiteBalanceParams(:as_shot)
+tonecurve_params = ToneCurveParams(:log_sigmoid, 0.5, 0.5)
+render_params = RenderParams()
+
 demoisaic = Demoisaic(
-    Dict(:file => ""),
+    demoisaic_params,
     ImageData(raw_image, zeros(w,h,4), true, false)
 )
-white_balance = WhiteBalance(
-    Dict(:method => :as_shot),
-    ImageData(raw_image, zeros(1,1,4), true, false)
+whitebalance = WhiteBalance(
+    whitebalance_params,
+    ImageData(raw_image, zeros(w,h,4), true, false)
 )
-tone_curve = ToneCurve(
-    tone_curve_params,
+tonecurve = ToneCurve(
+    tonecurve_params,
     ImageData(raw_image, zeros(w,h,3), true, false)
 )
 render = Render(
-    Dict(),
-    ImageData(raw_image, fill(Colors.RGB(1,1,1), 1, 1), true, false)
+    render_params,
+    ImageData(raw_image, fill(Colors.RGB(1,1,1), w, h), true, false)
 )
 
-process!(demoisaic, file)
-process!(white_balance, wb, demoisaic.data)
-process!(tone_curve, tone_curve_params, white_balance.data)
-process!(render, Dict(), tone_curve.data)
+##
+
+tonecurve_params.contrast = 0.5
+
+@time process!(demoisaic, demoisaic_params)
+@time process!(whitebalance, whitebalance_params, demoisaic.data)
+@time process!(tonecurve, tonecurve_params, whitebalance.data)
+@time process!(render, render_params, tonecurve.data)
 
 image(render.data.img)
-image(white_balance.data.img[:,:,3])
-image(tone_curve.data.img[:,:,3])
+
+##
+
+@code_warntype process!(tonecurve, tonecurve_params, whitebalance.data)
+
+##
+
+function asd(p, previous)
+    img = p.data
+    #copyto!(img, previous.img[:,:,1:3])
+    img
+end
+
+@code_warntype asd(tonecurve, whitebalance.data)
+
+##
+
+x = ImageData(raw_image, zeros(1,1,4), true, false)
+
+function asd(x)
+    x.img[1]
+end
+
+@code_warntype asd(x)
+
+##
+
 
 #@time raw_image, d = get_demoisaic(file)parama
