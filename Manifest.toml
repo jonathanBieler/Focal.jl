@@ -2,7 +2,7 @@
 
 julia_version = "1.11.1"
 manifest_format = "2.0"
-project_hash = "6f3e0c8ee4ba424a7c8c1c5baf5b94473a3694f7"
+project_hash = "2eb6f4d89ac68c5cf008b62097d16ea45ce97d7c"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -46,6 +46,11 @@ deps = ["Colors"]
 git-tree-sha1 = "e81c509d2c8e49592413bfb0bb3b08150056c79d"
 uuid = "27a7e980-b3e6-11e9-2bcd-0b925532e340"
 version = "0.4.1"
+
+[[deps.ArgCheck]]
+git-tree-sha1 = "a3a402a35a2f7e0b87828ccabbd5ebfbebe356b4"
+uuid = "dce04be8-c92d-5529-be00-80e4d2c0e197"
+version = "2.3.0"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -150,6 +155,12 @@ deps = ["Cairo_jll", "Colors", "Glib_jll", "Graphics", "Libdl", "Pango_jll"]
 git-tree-sha1 = "7b6ad8c35f4bc3bca8eb78127c8b99719506a5fb"
 uuid = "159f3aea-2a34-519c-b102-8c37f9878175"
 version = "1.1.0"
+
+[[deps.CairoMakie]]
+deps = ["CRC32c", "Cairo", "Cairo_jll", "Colors", "FileIO", "FreeType", "GeometryBasics", "LinearAlgebra", "Makie", "PrecompileTools"]
+git-tree-sha1 = "7947d2b61995eda7d5ca50c697b12bb578b918e5"
+uuid = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+version = "0.12.14"
 
 [[deps.Cairo_jll]]
 deps = ["Artifacts", "Bzip2_jll", "CompilerSupportLibraries_jll", "Fontconfig_jll", "FreeType2_jll", "Glib_jll", "JLLWrappers", "LZO_jll", "Libdl", "Pixman_jll", "Xorg_libXext_jll", "Xorg_libXrender_jll", "Zlib_jll", "libpng_jll"]
@@ -539,12 +550,10 @@ deps = ["Colors", "FileIO", "GLMakie", "GeometryBasics", "Gtk4", "Makie", "Moder
 git-tree-sha1 = "9c7c6088b6293e7adda22a2eaef862133da3fa47"
 uuid = "478199e7-b407-4926-87ea-7196203a28d8"
 version = "0.3.0"
+weakdeps = ["CairoMakie"]
 
     [deps.Gtk4Makie.extensions]
     Gtk4MakieCairoMakieExt = "CairoMakie"
-
-    [deps.Gtk4Makie.weakdeps]
-    CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 
 [[deps.HarfBuzz_jll]]
 deps = ["Artifacts", "Cairo_jll", "Fontconfig_jll", "FreeType2_jll", "Glib_jll", "Graphite2_jll", "JLLWrappers", "Libdl", "Libffi_jll"]
@@ -1023,6 +1032,19 @@ version = "1.1.1"
 [[deps.NetworkOptions]]
 uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
 version = "1.2.0"
+
+[[deps.ONNXRunTime]]
+deps = ["ArgCheck", "CEnum", "DataStructures", "DocStringExtensions", "LazyArtifacts", "Libdl", "Pkg"]
+git-tree-sha1 = "25b0c81d59c40cfe21204d3b08d48147be73fbe1"
+uuid = "e034b28e-924e-41b2-b98f-d2bbeb830c6a"
+version = "1.2.0"
+
+    [deps.ONNXRunTime.extensions]
+    CUDAExt = ["CUDA", "cuDNN"]
+
+    [deps.ONNXRunTime.weakdeps]
+    CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+    cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 
 [[deps.Observables]]
 git-tree-sha1 = "7438a59546cf62428fc9d1bc94729146d37a7225"
