@@ -25,5 +25,21 @@ image(render.data.img)
 
 @profview process!(tonecurve, tonecurve_params, whitebalance.data)
 
-##
+## test curves
 
+sigma(σ, x, lift, highlights) = σ + highlights*sigmoid(x - 2σ, 0, √σ/2) + lift*sigmoid(-(x + 2σ), 0, √σ/2)
+
+sigmoid2(x, μ, σ, lift, highlights) = 1 / (1 + exp(-(x-μ)/sigma(σ, x-μ, lift, highlights))) 
+
+xi = -2:0.01:2
+σ = 0.2
+μ = 0.1
+lift = 0.1
+highlights = 0.0
+
+p = lines(xi, sigmoid2.(xi, μ, σ, lift, highlights))
+lines!(xi, sigma.(σ, xi .-μ, lift, highlights))
+lines!(xi, σ .+ 0*xi)
+p
+
+##
