@@ -5,9 +5,16 @@ using Pkg; Pkg.activate(".")
 ##
 
 using Revise
-using Gtk4, Gtk4Makie, LibRaw, Memoize, Colors, Graphics
-using StatsBase
+using Gtk4, Gtk4Makie, LibRaw, Colors, Graphics
+using StatsBase, Statistics
 import Colors.FixedPointNumbers
+
+using ONNXRunTime, FileIO, ImageCore
+using CUDA
+import cuDNN
+
+using LoopVectorization
+using ImageTransformations, ImageCore
 
 @eval Gtk4 begin
     function _canvas_on_realize(::Ptr, canvas)
@@ -21,13 +28,16 @@ config = CairoMakie.ScreenConfig(1.0, 1.0, :good, true, false, nothing)
 CairoMakie.activate!()
 
 include("src/process_image.jl")
+include("src/depth_estimation.jl")
+include("src/ui.jl")
 
-mutable struct App2
+mutable struct App
     busy::Bool
     need_update::Bool
     last_update_time::Float64
     pipeline::Pipeline
-    App2() = new(false, false, time())
+    histogram::@NamedTuple{bins::Vector{Float64}, hist::Vector{Float64}}
+    App() = new(false, false, time())
 end
 
 function update!(app)
@@ -36,7 +46,9 @@ function update!(app)
     process!(p.demoisaic, app)
     process!(p.whitebalance, p.demoisaic.data, app)
     process!(p.depth, p.whitebalance.data, app)
-    process!(p.tonecurve, p.whitebalance.data, app)
+    process!(p.depth_of_field, p.depth.data, app)
+    process!(p.bokeh, p.whitebalance.data, app)
+    process!(p.tonecurve, p.bokeh.data, app)
     process!(p.render, p.tonecurve.data, app)
     app.busy = false
     p.render
@@ -47,16 +59,44 @@ function update_display!(app)
     render = update!(app)
 
     empty!(ax)
-    img = render.data.img
-    ax.aspect = size(img,1)/size(img,2)
+    if show_depth_button.active
+        img = app.pipeline.depth.depth
+    elseif show_dof_button.active
+        img = app.pipeline.depth_of_field.mask
+    else
+        img = render.data.img
+    end
 
-    uv_transform = render.params.uv_transform 
+    uv_transform = render.params.uv_transform
+    ax.aspect = get_aspect_ratio(uv_transform, img)
+
     if uv_transform == :automatic
         image!(ax, img)
     else
         image!(ax, img; uv_transform)
     end
 end
+
+function get_aspect_ratio(uv_transform, img)
+    if uv_transform ∈ (:automatic, :rot180, :flip_x, :flip_y, :flip_xy)
+        return size(img,1)/size(img,2)
+    else
+        size(img,2)/size(img,1)
+    end
+end
+
+function update_histogram!(app)
+    data = mean(app.pipeline.demoisaic.data.img, dims=(3)) |> vec
+    @. data = log10(max(data, 1e-16))
+    mu = mean(data)
+    @. data -= mu
+
+    bins = -2:0.1:2 |> collect
+    hist = fit(Histogram, data, bins)
+    hist = hist.weights ./ maximum(hist.weights)
+    app.histogram = (;bins, hist)
+end
+
 
 ## start window
 
@@ -75,21 +115,78 @@ g[2,1] = toolbox
 
 if !@isdefined app
 
-    global const app = App2()
+    global const app = App()
     app.pipeline = get_pipeline("I:\\photos\\2021\\avril\\crissier dimanche\\0V2A0073.CR3")
-    update_display!(app)
-
+    update_histogram!(app)
 end
 
-Gtk4.GLib.g_timeout_add(50) do  # create a function that will be called every 50 milliseconds
-    if app.need_update && !app.busy && (time() - app.last_update_time) > 2
-        @info "running update via main loop"
-        update_display!(app)
-        app.need_update = false
-        app.last_update_time = time()
-    end
-    true
-end 
+# depth
+
+depth_expander = GtkExpander("Depth estimation")
+depth_expander.expanded = true
+#Gtk4.size_request(depth_expander, toolbox_width, 200)
+
+depth_vbox = GtkBox(:v)
+depth_expander[] = depth_vbox
+push!(toolbox, depth_expander)
+
+refine_depth_button = GtkCheckButton("Refine depth")
+refine_depth_button.active = false
+
+signal_connect(refine_depth_button, "toggled") do widget
+    app.pipeline.depth.params.refine = refine_depth_button.active
+    app.need_update = true
+end
+push!(depth_vbox, refine_depth_button)
+
+choices = [:linear, :extrema]
+depth_method_dd = GtkDropDown(choices)
+# keep in mind that the "selected" property uses 0 based indexing
+depth_method_dd.selected = 0
+
+signal_connect(depth_method_dd, "notify::selected") do widget, others...
+    idx = widget.selected
+    str = Gtk4.selected_string(widget)
+    app.pipeline.depth.params.method = Symbol(str)
+    app.need_update = true
+end
+
+push!(depth_vbox, depth_method_dd)
+
+# DoF
+
+dof_expander = GtkExpander("dof estimation")
+dof_expander.expanded = true
+
+dof_vbox = GtkBox(:v)
+dof_expander[] = dof_vbox
+push!(toolbox, dof_expander)
+
+distance_scale, distance_box_gesture   = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.01, 0.99, 0.5, "Distance"; mapping_func = x -> 1 - x)
+width_scale, width_box_gesture         = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.05, 3, 2, "Width")
+pinch_scale, pinch_box_gesture         = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.5, 2, 1, "Pinch")
+contrast_scale, contrast_box_gesture   = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.1, 5.9, 3, "Contrast")
+threshold_scale, threshold_box_gesture = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.01, 0.99, 0.5, "Threshold")
+tilt_x_scale, tilt_x_box_gesture       = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, -0.75, 0.75, 0, "Tilt x"; field = :tilt_x)
+tilt_y_scale, tilt_y_box_gesture       = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, -0.75, 0.75, 0, "Tilt y"; field = :tilt_y)
+
+# bokeh
+
+bokeh_expander = GtkExpander("Bokeh")
+bokeh_expander.expanded = true
+
+bokeh_vbox = GtkBox(:v)
+bokeh_expander[] = bokeh_vbox
+push!(toolbox, bokeh_expander)
+
+bokeh_radius_scale, bokeh_radius_box_gesture = get_scale(bokeh_vbox, 1, 40, 15, "Radius")
+
+signal_connect(bokeh_radius_scale, "value-changed") do bokeh_radius_scale
+    app.pipeline.bokeh.params.radius = Gtk4.value(bokeh_radius_scale)
+end
+signal_connect(bokeh_radius_box_gesture, "released") do controller, n_press, x, y
+    app.need_update = true
+end
 
 # Tone Curve
 tonecurve_expander = GtkExpander("Tone curve")
@@ -99,24 +196,6 @@ Gtk4.size_request(tonecurve_expander, toolbox_width, 200)
 tonecurve_vbox = GtkBox(:v)
 tonecurve_expander[] = tonecurve_vbox
 push!(toolbox, tonecurve_expander)
-
-function get_scale(parent, min, max, default, label)
-
-    scale = GtkScale(:h, min, max, 0.01)
-    Gtk4.size_request(scale, toolbox_width, 10)
-
-    box = GtkBox(:h)
-    push!(box, scale)
-
-    box_gesture = GtkGestureClick(box, 0)
-    Gtk4.G_.set_propagation_phase(box_gesture, Gtk4.PropagationPhase_CAPTURE)
-
-    Gtk4.value(scale, default)
-    push!(parent, GtkLabel(label))
-    push!(parent, box)
-
-    scale, box_gesture
-end
 
 # contrast scale
 #= contrast_scale = GtkScale(:h, 0.5, 5.5, 0.01)
@@ -144,10 +223,10 @@ signal_connect(contrast_box_gesture, "released") do controller, n_press, x, y
 end
 
 # exposure scale
-exposure_scale, exposure_box_gesture = get_scale(tonecurve_vbox, -1.5, 1.5, 0, "Offset")
+exposure_scale, exposure_box_gesture = get_scale(tonecurve_vbox, -2, 2, 0, "Exposure")
 
 signal_connect(exposure_scale, "value-changed") do exposure_scale
-    app.pipeline.tonecurve.params.exposure = Gtk4.value(exposure_scale)
+    app.pipeline.tonecurve.params.exposure = -Gtk4.value(exposure_scale)
     c.draw(c)
     reveal(c)
 end
@@ -191,23 +270,21 @@ signal_connect(depth_box_gesture, "released") do controller, n_press, x, y
     app.need_update = true
 end
 
+# depth scale
+dof_slope_scale, dof_slope_box_gesture = get_scale(tonecurve_vbox, -1.5, 1.5, 0, "DoF slope")
+
+signal_connect(dof_slope_scale, "value-changed") do dof_slope_scale
+    app.pipeline.tonecurve.params.dof_slope = Gtk4.value(dof_slope_scale)
+    c.draw(c)
+    reveal(c)
+end
+signal_connect(dof_slope_box_gesture, "released") do controller, n_press, x, y
+    app.need_update = true
+end
+
 c = GtkCanvas()
 Gtk4.size_request(c,(toolbox_width,200))
 push!(tonecurve_vbox, c)
-
-if isdefined(app, :pipeline)
-    data = mean(app.pipeline.demoisaic.data.img, dims=(3)) |> vec
-    @. data = log10(max(data, 1e-16))
-    mu = mean(data)
-    @. data -= mu
-
-    bins = -2:0.1:2
-    hist = fit(Histogram, data, bins)
-    hist = hist.weights ./ maximum(hist.weights)
-else
-    bins = -2:0.1:2
-    hist = bins[1:end-1]
-end
 
 @guarded draw(c) do widget
     ctx = getgc(c)
@@ -232,7 +309,7 @@ end
         lift, highlights = params.lift, params.highlights
 
         f, ax, p = CairoMakie.barplot(bins[1:end-1], hist)
-        CairoMakie.autolimits!(ax) 	
+        CairoMakie.autolimits!(ax)
         #yi = sigmoid.(bins, app.pipeline.tonecurve.params.exposure, app.pipeline.tonecurve.params.contrast)
         yi = sigmoid2.(bins, exposure, contrast, lift, highlights)
         lines!(ax, bins, yi)
@@ -266,6 +343,27 @@ end
 
 push!(render_vbox, uv_transform_dd)
 
+show_depth_button = GtkCheckButton("Show Depth")
+signal_connect(show_depth_button, "toggled") do widget
+    
+    if !show_depth_button.active 
+        app.pipeline.tonecurve.force_update = true
+    end
+    update_display!(app)
+end
+push!(render_vbox, show_depth_button)
+
+show_dof_button = GtkCheckButton("Show DoF")
+signal_connect(show_dof_button, "toggled") do widget
+
+    # update bokeh when deactivate
+    if !show_dof_button.active && app.pipeline.depth_of_field.data.updated
+        app.pipeline.bokeh.force_update = true
+    end
+    update_display!(app)
+end
+push!(render_vbox, show_dof_button)
+
 #
 
 open_button = GtkButton(:icon_name, "document-open")
@@ -279,14 +377,31 @@ id = signal_connect(open_button, "clicked") do widget
     open_dialog("Pick a file to open", win) do filename
         
         # initialize a new pipeline
-        app.pipeline = get_pipeline(filename)
+        #app.pipeline = get_pipeline(filename)
+        reset!(app.pipeline, filename)
         update_display!(app)
+        c.draw(c)
+        reveal(c)
     end
 end
 
 id = signal_connect(render_button, "clicked") do widget
     update_display!(app)
 end
+
+## start and show
+
+update_display!(app)
+
+Gtk4.GLib.g_timeout_add(25) do  # create a function that will be called every x milliseconds
+    if app.need_update && !app.busy && (time() - app.last_update_time) > 0.1
+        @info "running update via main loop"
+        update_display!(app)
+        app.need_update = false
+        app.last_update_time = time()
+    end
+    true
+end 
 
 show(win)
 

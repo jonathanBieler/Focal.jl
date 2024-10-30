@@ -1,7 +1,3 @@
-using LibRaw, Colors, Statistics
-using LoopVectorization
-using ImageTransformations, ONNXRunTime, ImageCore
-
 
 abstract type Processor
 end
@@ -11,11 +7,13 @@ function have_params_changed(p::Processor, params)
 end
 
 function need_update(p::Processor, params, input)
+    p.force_update && return true
     input.updated && return true
     need_update(p, params)
 end
 
 function need_update(p::Processor, params)
+    p.force_update && return true
     !p.data.initialized && return true
     have_params_changed(p, params) && return true
     false
@@ -39,6 +37,7 @@ mutable struct Demoisaic{T} <: Processor
     params::DemoisaicParams
     previous_params::DemoisaicParams
     data::ImageData{T}
+    force_update::Bool
 end
 
 function process!(p::Demoisaic, app)
@@ -57,9 +56,9 @@ function process!(p::Demoisaic, app)
     p.data.img = img
     p.data.updated = true
     p.data.initialized = true
+    p.force_update = false
 
     p.previous_params = deepcopy(p.params)
-    
     p
 end
 
@@ -90,6 +89,7 @@ mutable struct WhiteBalance{T} <: Processor
     params::WhiteBalanceParams
     previous_params::WhiteBalanceParams
     data::ImageData{T}
+    force_update::Bool
 end
 
 function process!(p::WhiteBalance, input::ImageData, app)
@@ -135,25 +135,25 @@ function process!(p::WhiteBalance, input::ImageData, app)
     p.data.updated = true
     p.data.initialized = true
     p.previous_params = deepcopy(p.params)
+    p.force_update = false
     p
 end
 
 ## Depth estimation
 
-if !@isdefined da
-    @info "Loading depth_anything_v2"
-    da = ONNXRunTime.load_inference("D:\\dev\\Depth-Anything-ONNX\\weights\\depth_anything_v2_vitb_17.onnx")
-end
-
 mutable struct DepthParams
+    refine::Bool
+    method::Symbol
+    margin::Int64
 end
-Base.:(==)(x::DepthParams, y::DepthParams) = true
+Base.:(==)(x::DepthParams, y::DepthParams) = x.refine == y.refine && x.method == y.method && x.margin == y.margin
 
 mutable struct Depth{T} <: Processor
     params::DepthParams
     previous_params::DepthParams
     data::ImageData{T}
     depth::Matrix{Float32}
+    force_update::Bool
 end
 
 function process!(p::Depth, input::ImageData, app)
@@ -168,30 +168,113 @@ function process!(p::Depth, input::ImageData, app)
 
     img = p.data.img
     copyto!(img, @view input.img[:,:,1:3])
-    p.depth = estimate_depth(img,da)
+    #p.depth = estimate_depth(img,da)
+
+    p.depth = estimate_depth(img, app.pipeline.file, p.params.method, p.params.refine, p.params.margin)
 
     p.data.updated = true
     p.data.initialized = true
     p.previous_params = deepcopy(p.params)
+    p.force_update = false
 end
 
-function estimate_depth(img, model; normalize = true)
+##
 
-    dh, dw = 1400,924
-    
-    h,w = size(img,1), size(img,2)
-    img = imresize(img, (dh,dw,3))
-    img = PermutedDimsArray(img, (3, 1, 2))
-    img = reshape(Float32.(img), (1,3,dh,dw))
-    input = Dict("image" => img)
+mutable struct DoFParams
+    distance::Float64
+    width::Float64
+    pinch::Float64
+    threshold::Float64
+    contrast::Float64
+    tilt_x::Float64
+    tilt_y::Float64
+end
+Base.:(==)(x::DoFParams, y::DoFParams) = x.distance == y.distance && x.threshold == y.threshold && x.contrast == y.contrast &&
+x.width == y.width && x.pinch == y.pinch && x.tilt_x == y.tilt_x && x.tilt_y == y.tilt_y
 
-    depth = model(input)["depth"][1,:,:]
-    if normalize
-        depth = depth .-  minimum(depth)
-        depth = depth ./  maximum(depth)
+mutable struct DoF{T} <: Processor
+    params::DoFParams
+    previous_params::DoFParams
+    data::ImageData{T}
+    mask::Matrix{Float32}
+    force_update::Bool
+end
+
+function process!(p::DoF, input::ImageData, app)
+    params = p.params
+    if !need_update(p, params, input)
+        p.data.updated = false
+        return
     end
-    imresize(depth, (h,w))
+
+    @info "DoF"
+
+    #img = p.data.img
+    #copyto!(img, @view input.img[:,:,1:3])
+
+    target_distance = p.params.distance
+    width = p.params.width
+    pinch = p.params.pinch
+    tilt_x = p.params.tilt_x
+    tilt_y = p.params.tilt_y
+    depth = app.pipeline.depth.depth
+    x = tilt_x*LinRange(0,1,size(depth,1))
+    y = tilt_y*LinRange(0,1,size(depth,2))'
+
+    @tturbo @. p.mask = abs(depth - target_distance + x + y).^pinch + abs(depth - width*target_distance + x + y).^pinch
+    
+    k = p.params.contrast
+    th = p.params.threshold
+    @tturbo @. p.mask = (p.mask + th)^k / (th^k + (p.mask + th)^k)
+
+    p.mask = p.mask .-  minimum(p.mask)
+    p.mask = p.mask ./  maximum(p.mask)
+
+    p.data.updated = true
+    p.data.initialized = true
+    p.previous_params = deepcopy(p.params)
+    p.force_update = false
 end
+
+## Bokeh
+
+mutable struct BokehParams
+    radius::Float64
+end
+Base.:(==)(x::BokehParams, y::BokehParams) = x.radius == y.radius 
+
+mutable struct Bokeh{T} <: Processor
+    params::BokehParams
+    previous_params::BokehParams
+    data::ImageData{T}
+    force_update::Bool
+end
+
+function process!(p::Bokeh, input::ImageData, app)
+    params = p.params
+    if !need_update(p, params, input)
+        p.data.updated = false
+        return
+    end
+
+    @info "Bokeh"
+
+    img = p.data.img
+    #copyto!(img, @view input.img[:,:,1:3])
+    depth = app.pipeline.depth.depth
+    mask = app.pipeline.depth_of_field.mask
+    input_img = @view input.img[:,:,1:3]
+
+    #apply_blur!(input_img, img, depth, mask)
+
+    @time p.data.img = apply_blur_gpu!(input_img, img, depth, mask, p.params.radius)
+
+    p.data.updated = true
+    p.data.initialized = true
+    p.previous_params = deepcopy(p.params)
+    p.force_update = false
+end
+
 
 ## Tone curve
 
@@ -208,16 +291,19 @@ mutable struct ToneCurveParams
     lift::Float64
     highlights::Float64
     depth_slope::Float64
+    dof_slope::Float64
 end
 function Base.:(==)(x::ToneCurveParams, y::ToneCurveParams) 
     x.method == y.method && x.contrast == y.contrast && x.exposure == y.exposure &&
-    x.lift == y.lift && x.highlights == y.highlights && x.depth_slope == y.depth_slope
+    x.lift == y.lift && x.highlights == y.highlights && x.depth_slope == y.depth_slope &&
+    x.dof_slope == y.dof_slope
 end
 
 mutable struct ToneCurve{T} <: Processor
     params::ToneCurveParams
     previous_params::ToneCurveParams
     data::ImageData{T}
+    force_update::Bool
 end
 
 @guarded function process!(p::ToneCurve, input::ImageData, app)
@@ -231,8 +317,7 @@ end
     @info "Tone Curve"
     exposure, contrast = params.exposure, params.contrast
     lift, highlights = params.lift, params.highlights
-    depth_slope = params.depth_slope
-    @info depth_slope
+    depth_slope, dof_slope = params.depth_slope, params.dof_slope
 
     if contrast + lift < 0
         lift = -contrast + 0.01
@@ -250,16 +335,17 @@ end
     #depth = app.pipeline.depth.depth
     #depth = zeros(size(img)) .+ depth_slope
     depth = depth_slope * Float64.(app.pipeline.depth.depth)
+    dof = dof_slope * Float64.(app.pipeline.depth_of_field.mask)
 
     if params.method == :log_sigmoid
         @tturbo for i in eachindex(img)
             img[i] = log10(max(img[i], 1e-16))
         end
         mu = mean(img)
-        # @tturbo
-        for i in axes(img,1), j in axes(img,2), c in axes(img,3)
+        # 
+        @tturbo for i in axes(img,1), j in axes(img,2), c in axes(img,3)
             #img[i] = sigmoid(img[i] - mu, exposure, contrast)
-            img[i,j,c] = sigmoid2(img[i,j,c] - mu, exposure + depth[i,j], contrast, lift, highlights)
+            img[i,j,c] = sigmoid2(img[i,j,c] - mu, exposure + depth[i,j] + dof[i,j], contrast, lift, highlights)
             #img[i] = sigmoid2(img[i] - mu, exposure, contrast, lift, highlights)
         end
 
@@ -272,6 +358,7 @@ end
     p.data.updated = true
     p.data.initialized = true
     p.previous_params = deepcopy(p.params)
+    p.force_update = false
     p
 end
 
@@ -285,6 +372,7 @@ mutable struct Render{T} <: Processor
     params::RenderParams
     previous_params::RenderParams
     data::ImageData{T}
+    force_update::Bool
 end
 
 function process!(p::Render, input::ImageData, app)
@@ -311,17 +399,22 @@ function process!(p::Render, input::ImageData, app)
     p.data.updated = true
     p.data.initialized = true
     p.previous_params = deepcopy(p.params)
+    p.force_update = false
     p
 end
 
 mutable struct Pipeline
+    file::String
     raw_image::LibRaw.RawImage
     demoisaic::Demoisaic
     whitebalance::WhiteBalance
     depth::Depth
+    depth_of_field::DoF
+    bokeh::Bokeh
     tonecurve::ToneCurve
     render::Render
 end
+
 
 function get_pipeline(file)
 
@@ -331,44 +424,93 @@ function get_pipeline(file)
 
     demoisaic_params = DemoisaicParams(file)
     whitebalance_params = WhiteBalanceParams(:as_shot)
-    depth_params = DepthParams()
-    tonecurve_params = ToneCurveParams(:log_sigmoid, 0.5, 0.5, 0.0, 0.0, 0.0)
+    depth_params = DepthParams(false, :linear, 300)
+    dof_params = DoFParams(0.5, 2, 1, 0.1, 2, 0., 0.)
+    bokeh_params = BokehParams(10)
+    tonecurve_params = ToneCurveParams(:log_sigmoid, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0)
     render_params = RenderParams(:automatic)
 
     demoisaic = Demoisaic(
         demoisaic_params,
         deepcopy(demoisaic_params),
-        ImageData(raw_image, zeros(h,w,4), true, false)
+        ImageData(raw_image, zeros(h,w,4), true, false),
+        false
     )
     whitebalance = WhiteBalance(
         whitebalance_params,
         deepcopy(whitebalance_params),
-        ImageData(raw_image, zeros(h,w,4), true, false)
+        ImageData(raw_image, zeros(h,w,4), true, false),
+        false
     )
     depth = Depth(
         depth_params,
         deepcopy(depth_params),
         ImageData(raw_image, zeros(h,w,3), true, false),
-        zeros(Float32,h,w)
+        zeros(Float32,h,w),
+        false
+    )
+    depth_of_field = DoF(
+        dof_params,
+        deepcopy(dof_params),
+        ImageData(raw_image, zeros(h,w,3), true, false),
+        zeros(Float32,h,w),
+        false
+    )
+    bokeh = Bokeh(
+        bokeh_params,
+        deepcopy(bokeh_params),
+        ImageData(raw_image, zeros(h,w,3), true, false),
+        false
     )
     tonecurve = ToneCurve(
         tonecurve_params,
         deepcopy(tonecurve_params),
-        ImageData(raw_image, zeros(h,w,3), true, false)
+        ImageData(raw_image, zeros(h,w,3), true, false),
+        false
     )
     render = Render(
         render_params,
         deepcopy(render_params),
-        ImageData(raw_image, fill(Colors.RGB(1,1,1), h, w), true, false)
+        ImageData(raw_image, fill(Colors.RGB(1,1,1), h, w), true, false),
+        false
     )
 
     Pipeline(
+        file,
         raw_image,
         demoisaic,
         whitebalance,
         depth,
+        depth_of_field,
+        bokeh,
         tonecurve,
         render,
     )
+
+end
+
+function reset!(p::Pipeline, file)
+
+    raw_image = LibRaw.RawImage(file)
+    w, h = LibRaw.raw_width(raw_image)-2, LibRaw.raw_height(raw_image)-2 # I remove 2 pixels
+    h,w = div(h,2), div(w,2) 
+
+    p.file = file
+    p.raw_image = raw_image
+
+    p.demoisaic.params.file = file
+    p.demoisaic.force_update = true
+
+    #reset the buffers
+    p.demoisaic.data = ImageData(raw_image, zeros(h,w,4), true, false)
+    p.whitebalance.data = ImageData(raw_image, zeros(h,w,4), true, false)
+    p.depth.data = ImageData(raw_image, zeros(h,w,3), true, false)
+    p.depth_of_field.data = ImageData(raw_image, zeros(h,w,3), true, false)
+    p.bokeh.data = ImageData(raw_image, zeros(h,w,3), true, false)
+    p.tonecurve.data = ImageData(raw_image, zeros(h,w,3), true, false)
+    p.render.data = ImageData(raw_image, fill(Colors.RGB(1,1,1), h, w), true, false)
+
+    p.depth.depth = zeros(Float32,h,w)
+    p.depth_of_field.mask = zeros(Float32,h,w)
 
 end
