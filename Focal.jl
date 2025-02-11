@@ -111,7 +111,7 @@ g[2,1] = toolbox
 if !@isdefined app
 
     global const app = App()
-    app.pipeline = get_pipeline("I:\\photos\\2021\\avril\\crissier dimanche\\0V2A0073.CR3")
+    app.pipeline = get_pipeline(joinpath("data", "0V2A0073.CR3"))
     update_histogram!(app)
 end
 
