@@ -117,7 +117,7 @@ function estimate_depth(img, file::String, method::Symbol, do_refine::Bool, marg
     end
 
     @info "Loading depth_anything_v2"
-    @time depth_model = ONNXRunTime.load_inference("D:\\dev\\Depth-Anything-ONNX\\weights\\depth_anything_v2_vitb_17.onnx", execution_provider=:cuda)
+    @time depth_model = ONNXRunTime.load_inference(depthv2_path, execution_provider=:cuda)
 
     # depth on whole image
     depth = estimate_depth(img, depth_model)

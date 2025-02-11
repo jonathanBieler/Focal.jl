@@ -10,6 +10,8 @@ import cuDNN
 using LoopVectorization
 using ImageTransformations, ImageCore
 
+depthv2_path = "D:\\dev\\Depth-Anything-ONNX\\weights\\depth_anything_v2_vitb_17.onnx"
+
 @eval Gtk4 begin
     function _canvas_on_realize(::Ptr, canvas)
         canvas.is_sized && _canvas_on_resize(canvas.handle, width(canvas), height(canvas), canvas)
