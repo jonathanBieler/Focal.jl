@@ -178,6 +178,51 @@ function process!(p::Depth, input::ImageData, app)
     p.force_update = false
 end
 
+
+## Fog
+
+mutable struct FogParams
+    strength::Float64
+    power::Float64
+end
+Base.:(==)(x::FogParams, y::FogParams) = x.strength == y.strength && x.power == y.power
+
+mutable struct Fog{T} <: Processor
+    params::FogParams
+    previous_params::FogParams
+    data::ImageData{T}
+    force_update::Bool
+end
+
+function process!(p::Fog, input::ImageData, app)
+
+    params = p.params
+    if !need_update(p, params, input)
+        p.data.updated = false
+        return
+    end
+
+    @info "Fog"
+    raw_image = p.data.raw_image
+    
+#=     if !p.data.initialized
+        p.data.img = similar(input.img)
+    end =#
+    img = p.data.img
+    copyto!(img, @view input.img[:,:,1:3])
+    depth = app.pipeline.depth.depth
+
+    @tturbo for i in axes(img,1), j in axes(img,2), c in axes(img,3)
+        img[i,j,c] += p.params.strength*max(1 - depth[i,j] - p.params.power/5, 0)^(p.params.power)
+    end
+
+    p.data.updated = true
+    p.data.initialized = true
+    p.previous_params = deepcopy(p.params)
+    p.force_update = false
+    p
+end
+
 ##
 
 mutable struct DoFParams
@@ -409,6 +454,7 @@ mutable struct Pipeline
     demoisaic::Demoisaic
     whitebalance::WhiteBalance
     depth::Depth
+    fog::Fog
     depth_of_field::DoF
     bokeh::Bokeh
     tonecurve::ToneCurve
@@ -425,8 +471,9 @@ function get_pipeline(file)
     demoisaic_params = DemoisaicParams(file)
     whitebalance_params = WhiteBalanceParams(:as_shot)
     depth_params = DepthParams(false, :linear, 300)
+    fog_params = FogParams(0.0,1)
     dof_params = DoFParams(0.5, 2, 1, 0.1, 2, 0., 0.)
-    bokeh_params = BokehParams(10)
+    bokeh_params = BokehParams(0.0)
     tonecurve_params = ToneCurveParams(:log_sigmoid, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0)
     render_params = RenderParams(:automatic)
 
@@ -456,6 +503,12 @@ function get_pipeline(file)
         zeros(Float32,h,w),
         false
     )
+    fog = Fog(
+        fog_params,
+        deepcopy(fog_params),
+        ImageData(raw_image, zeros(h,w,3), true, false),
+        false
+    )
     bokeh = Bokeh(
         bokeh_params,
         deepcopy(bokeh_params),
@@ -481,6 +534,7 @@ function get_pipeline(file)
         demoisaic,
         whitebalance,
         depth,
+        fog,
         depth_of_field,
         bokeh,
         tonecurve,
@@ -505,6 +559,7 @@ function reset!(p::Pipeline, file)
     p.demoisaic.data = ImageData(raw_image, zeros(h,w,4), true, false)
     p.whitebalance.data = ImageData(raw_image, zeros(h,w,4), true, false)
     p.depth.data = ImageData(raw_image, zeros(h,w,3), true, false)
+    p.fog.data = ImageData(raw_image, zeros(h,w,3), true, false)
     p.depth_of_field.data = ImageData(raw_image, zeros(h,w,3), true, false)
     p.bokeh.data = ImageData(raw_image, zeros(h,w,3), true, false)
     p.tonecurve.data = ImageData(raw_image, zeros(h,w,3), true, false)

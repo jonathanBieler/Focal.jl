@@ -1,5 +1,4 @@
 mutable struct ImageProcessor
-    input::Array
     output::Array
     params::Dict
 

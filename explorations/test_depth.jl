@@ -1,7 +1,11 @@
 
+cd("D:\\dev\\Focal.jl")
+using Pkg; Pkg.activate(".")
+
 using ImageTransformations, ONNXRunTime, ImageCore
 
 ##
+
 using ONNXRunTime
 using CUDA
 import cuDNN

@@ -154,8 +154,8 @@ function estimate_depth(img, file::String, method::Symbol, do_refine::Bool, marg
     end
 
     outfile = splitext(file)[1] * "_depth.png"
-    #@info "Saved depth mask: $outfile"
-    #FileIO.save(outfile, depth)
+    @info "Saved depth mask: $outfile"
+    FileIO.save(outfile, depth)
 
     # make sure memory is free'd
     release(depth_model)
@@ -241,6 +241,7 @@ function apply_blur_kernel!(input, output, depth, mask, N, radius, h, w)
             depth_destination = depth[ii, jj]
 
             if  (depth_source - depth_destination)/(depth_source .+ 1e-16) < 1.1
+            #if  (depth_source > depth_destination)
                 for c in 1:3
                     output[i,j,c] += input[ii,jj,c]
                 end
@@ -289,8 +290,6 @@ function apply_blur_gpu!(input_img, img, depth, mask, radius)
     #end
     output |> Array
 end
-
-
 
 ##
 

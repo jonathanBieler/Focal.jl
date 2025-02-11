@@ -1,9 +1,3 @@
-
-cd("D:\\dev\\Focal.jl")
-using Pkg; Pkg.activate(".")
-
-##
-
 using Revise
 using Gtk4, Gtk4Makie, LibRaw, Colors, Graphics
 using StatsBase, Statistics
@@ -46,8 +40,9 @@ function update!(app)
     process!(p.demoisaic, app)
     process!(p.whitebalance, p.demoisaic.data, app)
     process!(p.depth, p.whitebalance.data, app)
+    process!(p.fog, p.whitebalance.data, app)
     process!(p.depth_of_field, p.depth.data, app)
-    process!(p.bokeh, p.whitebalance.data, app)
+    process!(p.bokeh, p.fog.data, app)
     process!(p.tonecurve, p.bokeh.data, app)
     process!(p.render, p.tonecurve.data, app)
     app.busy = false
@@ -131,7 +126,6 @@ depth_expander[] = depth_vbox
 push!(toolbox, depth_expander)
 
 refine_depth_button = GtkCheckButton("Refine depth")
-refine_depth_button.active = false
 
 signal_connect(refine_depth_button, "toggled") do widget
     app.pipeline.depth.params.refine = refine_depth_button.active
@@ -153,6 +147,31 @@ end
 
 push!(depth_vbox, depth_method_dd)
 
+## fog
+
+fog_expander = GtkExpander("Fog")
+fog_expander.expanded = true
+
+fog_vbox = GtkBox(:v)
+fog_expander[] = fog_vbox
+push!(toolbox, fog_expander)
+
+fog_radius_scale, fog_radius_box_gesture = get_scale(fog_vbox, 0.0, 1, 0, "Strength")
+signal_connect(fog_radius_scale, "value-changed") do fog_radius_scale
+    app.pipeline.fog.params.strength = Gtk4.value(fog_radius_scale)
+end
+signal_connect(fog_radius_box_gesture, "released") do controller, n_press, x, y
+    app.need_update = true
+end
+
+fog_power_scale, fog_power_box_gesture = get_scale(fog_vbox, 0.5, 4, 1, "Power")
+signal_connect(fog_power_scale, "value-changed") do fog_power_scale
+    app.pipeline.fog.params.power = Gtk4.value(fog_power_scale)
+end
+signal_connect(fog_power_box_gesture, "released") do controller, n_press, x, y
+    app.need_update = true
+end
+
 # DoF
 
 dof_expander = GtkExpander("dof estimation")
@@ -162,13 +181,13 @@ dof_vbox = GtkBox(:v)
 dof_expander[] = dof_vbox
 push!(toolbox, dof_expander)
 
-distance_scale, distance_box_gesture   = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.01, 0.99, 0.5, "Distance"; mapping_func = x -> 1 - x)
+distance_scale, distance_box_gesture   = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.01, 1.2, 0.5, "Distance"; mapping_func = x -> 1 - x)
 width_scale, width_box_gesture         = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.05, 3, 2, "Width")
 pinch_scale, pinch_box_gesture         = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.5, 2, 1, "Pinch")
 contrast_scale, contrast_box_gesture   = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.1, 5.9, 3, "Contrast")
 threshold_scale, threshold_box_gesture = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, 0.01, 0.99, 0.5, "Threshold")
-tilt_x_scale, tilt_x_box_gesture       = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, -0.75, 0.75, 0, "Tilt x"; field = :tilt_x)
-tilt_y_scale, tilt_y_box_gesture       = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, -0.75, 0.75, 0, "Tilt y"; field = :tilt_y)
+tilt_x_scale, tilt_x_box_gesture       = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, -1, 1, 0, "Tilt x"; field = :tilt_x)
+tilt_y_scale, tilt_y_box_gesture       = setup_scale_and_gesture(app, app.pipeline.depth_of_field.params, dof_vbox, -1, 1, 0, "Tilt y"; field = :tilt_y)
 
 # bokeh
 
@@ -308,6 +327,9 @@ push!(tonecurve_vbox, c)
         exposure, contrast = params.exposure, params.contrast
         lift, highlights = params.lift, params.highlights
 
+        bins = app.histogram.bins
+        hist = app.histogram.hist
+
         f, ax, p = CairoMakie.barplot(bins[1:end-1], hist)
         CairoMakie.autolimits!(ax)
         #yi = sigmoid.(bins, app.pipeline.tonecurve.params.exposure, app.pipeline.tonecurve.params.contrast)
@@ -372,7 +394,6 @@ box = GtkBox(:h)
 push!(box, open_button, render_button)
 g[1,2] = box
 
-
 id = signal_connect(open_button, "clicked") do widget
     open_dialog("Pick a file to open", win) do filename
         
@@ -395,7 +416,6 @@ update_display!(app)
 
 Gtk4.GLib.g_timeout_add(25) do  # create a function that will be called every x milliseconds
     if app.need_update && !app.busy && (time() - app.last_update_time) > 0.1
-        @info "running update via main loop"
         update_display!(app)
         app.need_update = false
         app.last_update_time = time()
@@ -403,11 +423,7 @@ Gtk4.GLib.g_timeout_add(25) do  # create a function that will be called every x 
     true
 end 
 
+update_histogram!(app)
 show(win)
 
-
 ##
-
-#xi = LinRange(-3,3,100)
-
-#lines(xi, sigmoid.(xi, 0.2,0))

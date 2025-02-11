@@ -9,7 +9,7 @@ demoisaic, whitebalance, tonecurve, render, demoisaic_params, whitebalance_param
 
 ##
 
-tonecurve_params.contrast = 0.01
+tonecurve_params.contrast = 0.01n
 tonecurve_params.exposure = 0.3
 
 @time process!(demoisaic, demoisaic_params)
@@ -34,7 +34,7 @@ sigmoid2(x, μ, σ, lift, highlights) = 1 / (1 + exp(-(x-μ)/sigma(σ, x-μ, lif
 xi = -2:0.01:2
 σ = 0.2
 μ = 0.1
-lift = 0.1
+lift = 0.2
 highlights = 0.0
 
 p = lines(xi, sigmoid2.(xi, μ, σ, lift, highlights))
